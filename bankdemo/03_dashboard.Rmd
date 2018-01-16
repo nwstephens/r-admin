@@ -1,0 +1,224 @@
+---
+title: "Model Dashboard"
+output: 
+  flexdashboard::flex_dashboard:
+    orientation: rows
+    vertical_layout: fill
+    source_code: embed
+runtime: shiny
+---
+
+```{r setup, include=FALSE}
+library(flexdashboard)
+library(tidyverse)
+library(shiny)
+library(dplyr)
+```
+
+```{r global, include=FALSE}
+
+predictions <- readRDS("data/predictions.RDS") %>%
+  filter(data == "test") %>%
+  mutate(
+    logistic_predict = ifelse(logistic_predict_no < .88, "yes", "no")
+  ) %>%
+  select(-c(data, logistic_predict_no))
+
+```
+
+
+# Sidebar {.sidebar}
+
+### Inputs
+
+```{r}
+
+sliderInput('calls_per_day', "Calls per Day", min = 50, max = 200, value = 50, step = 50)
+sliderInput('samples', "Samples", min = 100, max = 500, value = 250, step = 50)
+numericInput('cost_to_market', "Cost of Call", 10)
+numericInput('profit_from_sale', "Profit From Sale", 100)
+
+```
+
+
+### Filters
+
+```{r}
+
+sliderInput('euribor3m', "Euribor 3m", min(predictions$euribor3m), max(predictions$euribor3m), value = c(min(predictions$euribor3m), max(predictions$euribor3m)), step = .2)
+
+
+```
+
+-------
+
+``` {r}
+
+sliderInput('age', "Age", min(predictions$age), max(predictions$age), value = c(min(predictions$age), max(predictions$age)))
+# selectizeInput('job', "Choose Jobs", choices = unique(predictions$job), selected = unique(predictions$job), multiple = TRUE)
+selectizeInput('education', "Choose Education", choices = unique(predictions$education), selected = unique(predictions$education), multiple = TRUE)
+checkboxGroupInput('cellphone', "Contact Method", choices = unique(predictions$contact), selected = unique(predictions$contact))
+
+```
+
+-------
+
+```{r}
+
+actionButton("go_button", "Rerun")
+
+```
+
+# Explanation
+
+Using the test data from the dataset used to train the random forest model, we sample with replacement n "runs" of a fixed number of calls.  The dataset for sampling is filtered according to the parameters specified.  This sampling is repeated based on the number of inputs for the number of runs.
+
+*Expected Value of Population Plot* 
+
+The expected value of the population is the profit from successful sales multiplied by the number of successful calls per "run" of a specified number of calls minus the cost per those sampled (all if using the baseline model, or only those specified by the random forest model otherwise).  This is a gross value, not a per-capita value (i.e. the expected value should be about 10x greater if the number of calls per run is increased by 10x).  
+
+*Sensitivity Vs Population Baseline (Plot)*
+
+This plot shows the sensitivity (True Positive divided by All Positives) from the model as a function of the baseline population.  It is useful to observe whether the model performs better or worse given higher or lower baseline models.
+
+# Plots 
+
+## Output
+
+### Expected Value of Population
+
+```{r}
+
+output$graph_two <- renderPlot({
+  
+  ggplot(data = samples(), mapping = aes(color = percent_overall, x = baseline_expected_value_population, y = rf_expected_value_population)) + geom_jitter() + geom_smooth() + geom_abline(intercept = 0, slope = 1)
+  
+})
+
+
+plotOutput("graph_two")
+
+
+
+```
+
+
+## Vs Baseline
+
+### Sensitivity vs Population Baseline
+
+```{r}
+
+output$graph <- renderPlot({
+  
+  ggplot(data = samples(), mapping = aes(x = percent_overall, y = rf_sensitivity)) + geom_boxplot(aes(group = group_for_boxplot)) + scale_x_continuous(name = "percent overall", breaks = seq(0, 1, .05)) + scale_y_continuous(name = "sensitivity", breaks = seq(0, 1, .1))
+  
+})
+
+
+plotOutput("graph")
+
+
+
+```
+
+### Specificity vs Population Baseline
+
+```{r}
+
+output$graph3 <- renderPlot({
+  
+  ggplot(data = samples(), mapping = aes(x = percent_overall, y = rf_specificity)) + geom_boxplot(aes(group = group_for_boxplot)) + scale_x_continuous(name = "percent overall", breaks = seq(0, 1, .05)) + scale_y_continuous(name = "specificity", breaks = seq(0, 1, .1))
+  
+})
+
+
+plotOutput("graph3")
+
+
+
+```
+
+
+# Raw Data
+
+```{r}
+
+universe_of_samples <- reactive({
+  
+  input$go_button
+  
+  to_return <- predictions %>%
+    filter(
+      euribor3m >= min(isolate(input$euribor3m)),
+      euribor3m <= max(isolate(input$euribor3m)),
+      age >= min(isolate(input$age)),
+      age <= max(isolate(input$age)),
+      # job %in% unique(input$job),
+      education %in% unique(isolate(input$education)),
+      contact %in% unique(isolate(input$cellphone))
+    ) %>%
+    select(term_deposit, logistic_predict, downsample_predict)
+
+
+to_return
+
+})
+# --
+
+
+
+```
+
+```{r}
+
+samples <- reactive({
+  
+  tibble(sample = (1:isolate(input$samples))) %>%
+    mutate(
+      data = map(sample, function(x) universe_of_samples() %>% 
+                   sample_n(size = isolate(input$calls_per_day), replace = TRUE) %>%
+                   summarize(
+                     total_calls = nrow(.),
+                     actual = sum(ifelse(term_deposit == "yes", 1, 0)),
+                     random_forest = sum(ifelse(downsample_predict == "yes", 1, 0)),
+                     percent_overall = round(actual / total_calls, 2),
+                     rf_true_positive = round(sum(ifelse(downsample_predict == "yes" & term_deposit == "yes", 1, 0))/total_calls, 2),
+                     rf_false_positive = round(sum(ifelse(downsample_predict == "no" & term_deposit == "yes", 1, 0))/total_calls, 2),
+                     rf_false_negative = round(sum(ifelse(downsample_predict == "no" & term_deposit == "yes", 1, 0))/total_calls, 2),
+                     rf_true_negative = 1 - rf_true_positive - rf_false_positive - rf_false_negative,
+                     rf_sensitivity = (rf_true_positive/(rf_true_positive + rf_false_positive)),
+                     rf_specificity = (rf_true_negative/(rf_true_negative + rf_false_negative)),
+                     rf_expected_value_population = (rf_true_positive * (isolate(input$profit_from_sale) - isolate(input$cost_to_market)) + rf_false_positive * -1 * isolate(input$cost_to_market)) * random_forest,
+                     baseline_expected_value_population = (percent_overall * isolate(input$profit_from_sale) +  -1 * isolate(input$cost_to_market)) * total_calls
+                   )
+                 )
+    ) %>%
+    tidyr::unnest(data) %>%
+    mutate(unique_rows = nrow(universe_of_samples()),
+           group_for_boxplot = .025*(round(percent_overall/.025)))
+  
+  
+  # %>%
+  #   summarize_all(function(x) str_c(quantile(x), collapse = ", "))
+
+  
+})
+
+
+
+
+
+
+output$table <- renderTable({
+
+  samples()
+  
+    })
+  
+
+
+tableOutput("table")
+
+
+```

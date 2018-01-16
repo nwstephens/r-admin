@@ -1,0 +1,46 @@
+---
+title: "Bank data scoring"
+output: html_notebook
+---
+
+## Ranger
+
+```{bash}
+inputfile="data/all_data.csv"
+outputfile="data/ranger_output.csv"
+cat /dev/null > $outputfile
+while IFS= read -r inputline
+do
+score=`curl -X GET "http://colorado.rstudio.com:3939/content/852/ranger?inputline=$inputline"`
+score=`echo $score | sed s/\"//g`
+echo $inputline,$score >> $outputfile
+done < "$inputfile"
+```
+
+## Logistic
+
+```{bash, message=FALSE}
+inputfile="data/all_data.csv"
+outputfile="data/logistic_output.csv"
+cat /dev/null > $outputfile
+while IFS= read -r inputline
+do
+score=`curl -X GET "http://colorado.rstudio.com:3939/content/852/logistic?inputline=$inputline"`
+echo $inputline,$score >> $outputfile
+done < "$inputfile"
+```
+
+## Validation
+
+```{bash, message=FALSE}
+inputfile="data/head_data.csv"
+while IFS= read -r inputline
+do
+score=`curl -X GET "http://colorado.rstudio.com:3939/content/852/logistic?inputline=$inputline"`
+echo $inputline,$score
+done < "$inputfile"
+```
+
+
+
+

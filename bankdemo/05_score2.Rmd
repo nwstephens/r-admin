@@ -1,0 +1,46 @@
+---
+title: "Bank data scoring"
+output: html_document
+---
+
+## Logistic
+
+```{bash, message=FALSE}
+inputfile="data/top_data.csv"
+outputfile="data/logistic_output.csv"
+cat /dev/null > $outputfile
+while IFS= read -r inputline
+do
+score=`curl -X GET "http://colorado.rstudio.com:3939/content/852/logistic?inputline=$inputline"`
+echo $inputline,$score >> $outputfile
+done < "$inputfile"
+```
+
+## Ranger
+
+```{bash, include=FALSE}
+inputfile="data/top_data.csv"
+outputfile="data/ranger_output.csv"
+cat /dev/null > $outputfile
+while IFS= read -r inputline
+do
+score=`curl -X GET "http://colorado.rstudio.com:3939/content/852/ranger?inputline=$inputline"`
+score=`echo $score | sed s/\"//g`
+echo $inputline,$score >> $outputfile
+done < "$inputfile"
+```
+
+
+## Validation
+
+```{r}
+library(readr)
+tmp<-read_csv("/home/nathan/projects/rstudio-build-scripts/data/logistic_output.csv")
+table(tmp[[15]],tmp[[17]])
+tmp<-read_csv("/home/nathan/projects/rstudio-build-scripts/data/ranger_output.csv")
+nrow(tmp)
+```
+
+
+
+

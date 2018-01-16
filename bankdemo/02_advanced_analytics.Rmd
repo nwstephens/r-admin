@@ -1,0 +1,266 @@
+---
+title: "Bank Marketing Conversion"
+output:
+  html_notebook:
+    code_folding: hide
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+library(tidyverse)
+library(stringr)
+library(forcats)
+library(broom)
+library(caret)
+library(e1071)
+library(ranger)
+library(plotly)
+library(pROC)
+```
+
+# Overview
+
+## Data
+
+We are working with a dataset from a Portuguese bank.  The data categorizes direct marketing efforts (phone calls) designed to sell term deposit products.  The [dataset](https://archive.ics.uci.edu/ml/datasets/Bank+Marketing) was donated to UCI's Machine Learning Repository.
+
+The goal of this analysis is to use the data to tailor future marketing efforts.  The "client" has a known cost per interaction, and would like to deploy those costs in scenarios that maximize the return on their investment.
+
+## Approach
+
+We explore three modeling methods that can be used to estimate the exepcted value of customer contacts in future marketing campaigns.  
+
+1. Logistic Regression
+2. Random Forest
+3. Random Forest with Cross Validation
+
+First, we apply a logistic regression that gives an easily interpertable model for scoring the likliehood that a customer subscribes; this can produce a continuous "expected customer value."
+
+Second, we build a random forest model that provides a more "black box" scoring model.  Additionally, this model provides discrete categorizations rather than probabalistic estimates.  This means that each cohort has a shared "expected value."
+
+Third, we will refine the random forest model using cross validation. Cross validation should help improve the prediction accuracy on our test data.
+
+# Data Prep
+
+## Load Data
+
+```{r}
+all_data <- readRDS("data/all_data.RDS")
+```
+
+## Training Data For Analysis
+
+```{r}
+set.seed(3456)
+
+trainIndex <- createDataPartition(
+  all_data$term_deposit, 
+  p = .25, 
+  list = FALSE, 
+  times = 1
+  )
+
+training_and_test_data <- all_data %>%
+  mutate(
+    education = case_when(
+      education %in% c("basic.4y", "basic.6y", "illiterate") ~ "less.than.5.years",
+      TRUE ~ education
+    ),
+    train_or_test = case_when(
+      row_number() %in% trainIndex ~ "train",
+      TRUE ~ "test"
+    )
+  ) %>%
+  select(-nearZeroVar(.)) %>%
+  select(-in_default) %>%
+  mutate_at(
+    vars(job, marital, education, housing_loan, personal_loan, contact, month, day_of_week, prior_outcome, term_deposit),
+    funs(as_factor(.))) %>%
+  mutate(term_deposit = fct_relevel(term_deposit, "yes", "no")) %>%
+  group_by(train_or_test) %>%
+  nest() 
+
+training_data <- training_and_test_data %>%
+  filter(train_or_test == "train") %>%
+  unnest() %>%
+  select(-train_or_test)
+
+testing_data <- training_and_test_data %>%
+  filter(train_or_test == "test") %>%
+  unnest() %>%
+  select(-train_or_test) 
+```
+
+# Models
+
+## 1. Logistic Regression
+
+In this context, a negative co-efficient makes it more likely that someone will purchase a term_deposit (i.e. a positive number is "no purchase").
+
+```{r}
+m1 <- glm(term_deposit ~ ., binomial, training_data)
+
+tidy(m1) %>% 
+  filter(p.value < .05) %>% 
+  arrange(abs(p.value)) %>%
+  ggplot(aes(reorder(term, desc(p.value)), abs(statistic))) + 
+  geom_bar(stat = "Identity") + 
+  coord_flip() +
+  theme_minimal() +
+  labs(x = "", y = "", title = "abs(t-value) logisitic model")
+```
+
+
+```{r}
+# Predict
+pred <- bind_rows("train" = training_data, "test" = testing_data, .id = "data") %>%
+  mutate(
+    pred = predict(m1, ., type = "response")) %>%
+  mutate(decile = ntile(desc(pred), 10)) %>%
+  select(data, term_deposit, pred, decile)
+
+# ROC plot
+pred %>%
+  filter(data == "test") %>%
+  roc(term_deposit ~ pred, .) %>%
+  plot.roc(., print.auc = TRUE)
+
+# Lift plot
+pred %>%
+  group_by(data, decile) %>%
+  summarize(percent = 100 * (mean(ifelse(term_deposit == "no", 0, 1)))) %>%
+  ggplot(aes(decile, percent, fill = data)) + geom_bar(stat = "Identity", position = "dodge") +
+  ggtitle("Lift chart for logistic regression model")
+
+# Sensitivity Vs Specificity
+roc_output <- roc(term_deposit ~ pred, pred)
+sensitivity <- data_frame(
+  value = roc_output$sensitivities, 
+  type = "sensitivity", 
+  thresholds = roc_output$thresholds
+  )
+specificity <- data_frame(
+  value = roc_output$specificities, 
+  type = "specificity", 
+  thresholds = roc_output$thresholds
+  )
+bind_rows(sensitivity, specificity) %>%
+  ggplot(mapping = aes(color = type, x = thresholds, y = value)) + 
+  geom_line() + 
+  scale_x_continuous(name = "thresholds", breaks = seq(0, 1, .05)) + 
+  scale_y_continuous(name = "value", breaks = seq(0, 1, .1))
+```
+
+```{r}
+# Pick a cutoff where the specificity is similar to the specificity of the random forest model, so that you compare sensitivities with similar TNRs.
+cutoff <- .88
+sample_test_logistic <- testing_data %>%
+  mutate(
+    predicted = case_when(
+      predict(m1, ., type = 'response') <= cutoff ~ "yes",
+      TRUE ~ "no")
+  )
+confusion_matrix_logistic <- confusionMatrix(sample_test_logistic$predicted, sample_test_logistic$term_deposit)
+confusion_matrix_logistic
+prop.table(confusion_matrix_logistic$table)
+```
+
+## 2. Random Forest
+
+```{r}
+training_data_to_use <- training_data 
+ranger_model <- ranger(term_deposit ~  . , data = training_data_to_use, importance = "impurity")
+data.frame(varImp = ranger_model$variable.importance) %>%
+  ggplot(aes(reorder(rownames(.), varImp), varImp)) + 
+  geom_bar(stat="Identity") + 
+  coord_flip() +
+  theme_minimal() +
+  labs(x = "", y = "", title = "Random Forest Variable Importance")
+sample_test_ranger <- testing_data %>%
+  mutate(
+    predicted = predictions(predict(ranger_model, .))
+  )
+confusion_matrix_ranger <- confusionMatrix(
+  sample_test_ranger$predicted, 
+  sample_test_ranger$term_deposit
+  )
+confusion_matrix_ranger
+prop.table(confusion_matrix_ranger$table)
+
+```
+
+
+## 3. Cross Validation Random foreest
+
+```{r}
+trainctrl <- trainControl(
+  verboseIter = TRUE, 
+  method="cv", 
+  number=3, 
+  savePredictions = TRUE, 
+  sampling = "down",
+  classProbs = TRUE)
+caret_cv <- train(
+  term_deposit ~ ., 
+  method = 'ranger', 
+  data = training_data_to_use, 
+  trControl = trainctrl, 
+  metric = 'Kappa', 
+  tuneLength = 3, 
+  importance = 'impurity')
+```
+
+```{r}
+varImp(caret_cv)$importance %>%
+  ggplot(aes(reorder(rownames(.), Overall), Overall)) +
+  geom_bar(stat = "Identity") +
+  coord_flip() +
+  labs(x = "", y = "", title = "Variable Importance CV Random Forest")
+```
+
+```{r}
+sample_caret_cv <- testing_data %>%
+  mutate(
+    predicted = predict(caret_cv, .)
+  )
+confusion_matrix_cv <- confusionMatrix(sample_caret_cv$predicted, sample_caret_cv$term_deposit)
+confusion_matrix_cv
+prop.table(sample_caret_cv$table)
+```
+
+# Summary
+
+
+```{r}
+pred_all <- bind_rows("train" = training_data, "test" = testing_data, .id = "data") %>%
+  mutate(
+    log_pred = ifelse(predict(m1, ., type = "response")  <= cutoff, "yes", "no"),
+    rf_pred = predictions(predict(ranger_model, .)),
+    cv_pred = predict(caret_cv, .)
+  )
+```
+
+```{r}
+rbind(
+  bind_cols(
+    Metric = names(confusion_matrix_cv$overall),
+    Logistic = round(confusion_matrix_logistic$overall, 2),
+    RandomForest = round(confusion_matrix_ranger$overall, 2),
+    RandomForestCV = round(confusion_matrix_cv$overall, 2)
+  ),
+  bind_cols(
+    Metric = names(confusion_matrix_cv$byClass),
+    Logistic = round(confusion_matrix_logistic$byClass, 2),
+    RandomForest = round(confusion_matrix_ranger$byClass, 2),
+    RandomForestCV = round(confusion_matrix_cv$byClass, 2)
+  )
+)
+```
+
+```{r}
+saveRDS(m1, "04_predict_api/model_logistic.RDS")
+saveRDS(ranger_model, "04_predict_api/model_ranger.RDS")
+saveRDS(caret_cv, "04_predict_api/model_caret.RDS")
+saveRDS(pred_all, "data/pred_all.RDS")
+saveRDS(training_data[NULL, ], "04_predict_api/training_data_str.RDS")
+```
