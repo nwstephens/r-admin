@@ -1,0 +1,46 @@
+---
+title: "Insert data into PostgreSQL"
+output: html_document
+---
+
+```{r setup}
+library(readr)
+library(DBI)
+```
+
+# Read data
+
+```{r}
+bank <- read_csv("bank.csv")
+```
+
+# Insert data
+
+```{r}
+con <- dbConnect(odbc::odbc(), "Postgres (finance)")
+
+vec <- seq(1, nrow(bank), by = 1024)
+
+dbRemoveTable(con, "bank")
+
+for(i in vec){
+  j <- min(i + 1023, nrow(bank))
+  dd <- bank[i:j, ]
+  if(i == 1){
+    dbWriteTable(con, "bank", dd, overwrite = TRUE)
+  }
+  else{
+    dbWriteTable(con, "bank", dd, append = TRUE)
+  }
+  cat(i, "; ")
+}
+```
+
+# Validate
+
+```{r}
+dbGetQuery(con, "select * from bank")
+dbGetQuery(con, "select count(*) from bank")
+```
+
+
