@@ -1,0 +1,114 @@
+---
+title: "Tidy Predict"
+output: html_notebook
+---
+
+# Data Prep
+
+## Flights data
+
+```{r}
+library(tidyverse)
+flights_table <- nycflights13::flights %>%
+  mutate(current_score = 0) %>%
+  rowid_to_column("flight_id")
+```
+
+## Load data
+
+```{r}
+library(DBI)
+con <- dbConnect(odbc::odbc(), "Postgres (Finance)")
+dbWriteTable(con, "flights_table", flights_table)
+db_fligths <- tbl(con, "flights_table")
+```
+
+## Sample data
+
+```{r}
+df <- db_fligths %>%
+  select(dep_delay, hour, distance) %>%
+  head(1000) %>%
+  collect() 
+```
+
+## Model
+
+```{r}
+library(tidypredict)
+model <- lm(dep_delay ~ ., data = df)
+tidypredict_test(model)
+if(tidypredict_test(model)$alert) stop("Threshold exceeded!")
+```
+
+# Database update
+
+## Update
+
+```{r}
+library(dbplyr)
+update_statement <- build_sql("UPDATE flights_table SET current_score  = ", tidypredict_sql(model, con = con), con = con)
+update_statement
+```
+
+## Update
+
+```{r}
+dbSendQuery(con, update_statement)
+```
+
+## Examine
+
+```{r}
+db_fligths %>%
+  select(flight_id, year, month, day, dep_delay, hour, distance, current_score) %>%
+  head(10) 
+```
+
+# DB Insert
+
+## New table
+
+```{r}
+dbWriteTable(con, "daily_scores", 
+             tibble(
+               flight_id = 0,
+               score = 0,
+               date = ""
+             ))
+```
+
+## Predict
+
+```{r}
+new_predictions <- db_fligths %>%
+  filter(month == 12) %>% 
+  tidypredict_to_column(model, vars = "score") %>%
+  select(
+    flight_id,
+    score) %>%
+  mutate(date = "01/01/2018")
+```
+
+## Insert scores
+
+```{r}
+insert_scores <- build_sql("INSERT INTO daily_scores ", sql_render(new_predictions, con = con), con = con)
+insert_scores
+```
+
+## Insert 
+
+```{r}
+dbExecute(con, insert_scores)
+```
+
+## Daily scores
+
+```{r}
+tbl(con, "daily_scores") %>%
+  inner_join(tbl(con, "flights_table"), by = "flight_id") %>%
+  filter(date == "01/01/2018") %>%
+  select(dep_delay, hour, distance, score, date)
+```
+

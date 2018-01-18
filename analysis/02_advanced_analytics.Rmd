@@ -206,7 +206,7 @@ rbind(
 
 ```{r}
 saveRDS(m1, "api/model_logistic.RDS")
-saveRDS(rf_model, "api/model_ranger.RDS")
+saveRDS(rf_model, "api/model_rf.RDS")
 saveRDS(pred_all, "api/pred_all.RDS")
 saveRDS(training_data[NULL, ], "api/training_data_str.RDS")
 ```
