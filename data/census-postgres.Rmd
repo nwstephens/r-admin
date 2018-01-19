@@ -1,0 +1,46 @@
+---
+title: "Insert data into PostgreSQL"
+output: html_document
+---
+
+```{r setup}
+library(readr)
+library(DBI)
+```
+
+# Read data
+
+```{r}
+census <- read_csv("pred.csv")
+```
+
+# Insert data
+
+```{r}
+con <- dbConnect(odbc::odbc(), "Postgres (finance)")
+
+vec <- seq(1, nrow(census), by = 1024)
+
+dbRemoveTable(con, "census")
+
+for(i in vec){
+  j <- min(i + 1023, nrow(census))
+  dd <- census[i:j, ]
+  if(i == 1){
+    dbWriteTable(con, "census", dd, overwrite = TRUE)
+  }
+  else{
+    dbWriteTable(con, "census", dd, append = TRUE)
+  }
+  cat(i, "; ")
+}
+```
+
+# Validate
+
+```{r}
+dbGetQuery(con, "select * from census")
+dbGetQuery(con, "select count(*) from census")
+```
+
+

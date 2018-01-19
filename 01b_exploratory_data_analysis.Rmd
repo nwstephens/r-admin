@@ -1,0 +1,158 @@
+---
+title: "Bank Marketing Exploratory Analysis"
+output: html_notebook
+---
+
+```{r, message=FALSE}
+library(tidyverse)
+library(stringr)
+library(dygraphs)
+library(xts)
+library(plotly)
+library(DBI)
+library(dbplyr)
+```
+
+## Extract data
+
+```{r}
+con <- dbConnect(odbc::odbc(), "Postgres (finance)")
+bank <- tbl(con, "bank")
+```
+
+## Insights
+
+There were far more contacts in 2008 and 2009.
+
+```{r}
+
+# Monthly rollup
+dat <- bank %>%
+  group_by(month_idx, year, month, date) %>%
+  summarize(subscribe = sum(ifelse(term_deposit == "yes", 1, 0)), 
+            total = as.numeric(n()),
+            percent = 100 * mean(ifelse(term_deposit == "yes", 1, 0))) %>%
+  collect
+
+# Percent
+xts(dat$percent, dat$date) %>%
+  dygraph(main = "Percent subscribing") %>%
+  dyRangeSelector()
+
+# Totals
+with(dat, xts(cbind(Total = total, Subscribe = subscribe), date)) %>%
+  dygraph(main = "Total contacts and subscriptions") %>%
+  dyRangeSelector()
+```
+
+Term deposits are correlated to some extent with macro economic indicators.
+
+```{r}
+p <- bank %>%
+  group_by(month_idx, year, month) %>%
+  summarize(euribor3m = mean(euribor3m),
+            cons_conf_idx = mean(cons_conf_idx),
+            cons_price_idx = mean(cons_price_idx),
+            term_deposit = 100 * mean(ifelse(term_deposit == "yes", 1, 0))) %>%
+  ungroup %>%
+  collect
+
+p2 <- p %>%
+  mutate_at(vars(euribor3m, cons_conf_idx, cons_price_idx),
+                 function(x) (x - min(x)) / (max(x) - min(x))) %>%
+  gather("key", "value", euribor3m, cons_conf_idx, cons_price_idx)
+
+ggplot(p2, aes(month_idx, value, color = key)) +
+  geom_line() +
+  ggtitle("Economic Indicators") +
+  xlab("Month") +
+  ylab("Index")
+
+ggplot(p2, aes(term_deposit, value, color = year)) +
+  geom_point() +
+  facet_grid(~key) +
+  ggtitle("Economic Indicators vs Term Deposits") +
+  xlab("Term Depoist Percent") +
+  ylab("Index")
+
+```
+
+Lower rates of `euribor3m` were associated with associated with more term desposits. 
+
+```{r}
+collect(bank) %>%
+ggplot(aes(euribor3m, color = term_deposit)) +
+  geom_density(adjust=0.05)
+```
+
+Clients with a successful prior outcome were much more likley to subscribe to a term deposit.
+
+```{r}
+bank %>%
+  group_by(term_deposit) %>%
+  count(prior_outcome) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  select(-n) %>%
+  collect %>%
+  spread(term_deposit, pct)
+```
+
+Contacts who subscribe to term deposits skew slightly older and younger.
+
+```{r}
+collect(bank) %>%
+qplot(term_deposit, age, data = ., geom = "boxplot")
+```
+
+October saw an unusually high percent of term deposits in 2008.
+
+```{r}
+p <- bank %>%
+  mutate(year = as.character(year)) %>%
+  group_by(year, month) %>%
+  summarize(term_deposit = 100 * mean(ifelse(term_deposit == "yes", 1, 0))) %>%
+  collect %>%
+  ggplot(aes(month, term_deposit, fill = year)) +
+  geom_bar(stat = "identity", position="dodge")
+
+ggplotly(p)
+```
+
+Blue collar workers are less likely to subscribe.
+
+```{r}
+bank %>%
+  group_by(term_deposit) %>%
+  count(job) %>%
+  mutate(pct = round(100 * n / sum(n), 1)) %>%
+  select(-n) %>%
+  collect %>%
+  spread(term_deposit, pct)
+```
+
+There were far more contacts in 2008 than in 2010
+
+```{r}
+bank %>%
+  group_by(year, month) %>%
+  summarize(
+    term_deposit = sum(ifelse(term_deposit == "yes", 1, 0)), 
+    count = as.numeric(n())
+    ) %>%
+  ungroup %>%
+  collect %>%
+  mutate(year = as.factor(year)) %>%
+  ggplot(aes(count, term_deposit, color = year)) +
+  geom_point() +
+  xlab("Total contacts") +
+  ylab("Term Deposit Subscriptions") +
+  ggtitle("Contact volume")
+```
+
+## Conclusions
+
+There is a lot of variability in total contacts and in percentage of term deposit subscriptions over time. There were far more contacts made in 2008 when the three month Euribor rate was high. As total contacts dropped, the percentage of term deposit subsriptions increased.
+
+Subscriptions are correlated with a variety of factors, including age and job to name a few. There is also a strong correlation with prior outcomes, as one might expect.
+
+This analysis only analyzed a few select variables. The next goal should be to predict term deposit subscriptions as a function of all the variables in the data.

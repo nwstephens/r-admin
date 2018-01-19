@@ -1,0 +1,189 @@
+---
+title: "Bank Marketing Conversion"
+output:
+  html_notebook:
+    code_folding: hide
+---
+
+```{r setup, message=FALSE, warning=FALSE}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+library(tidyverse)
+library(stringr)
+library(forcats)
+library(randomForest)
+library(pROC)
+library(DBI)
+library(caret)
+library(broom)
+```
+
+# Overview
+
+## Data
+
+We are working with a dataset from a Portuguese bank.  The data categorizes direct marketing efforts (phone calls) designed to sell term deposit products.  The [dataset](https://archive.ics.uci.edu/ml/datasets/Bank+Marketing) was donated to UCI's Machine Learning Repository.
+
+The goal of this analysis is to use the data to tailor future marketing efforts.  The "client" has a known cost per interaction, and would like to deploy those costs in scenarios that maximize the return on their investment.
+
+## Approach
+
+We explore three modeling methods that can be used to estimate the exepcted value of customer contacts in future marketing campaigns.  
+
+1. Logistic Regression
+2. Random Forest
+
+First, we apply a logistic regression that gives an easily interpertable model for scoring the likliehood that a customer subscribes; this can produce a continuous "expected customer value."
+
+Second, we build a random forest model that provides a more "black box" scoring model.  Additionally, this model provides discrete categorizations rather than probabalistic estimates.  This means that each cohort has a shared "expected value."
+
+Third, we will refine the random forest model using cross validation. Cross validation should help improve the prediction accuracy on our test data.
+
+## Connect to database
+
+```{r}
+con <- dbConnect(odbc::odbc(), "Postgres (finance)")
+bank <- tbl(con, "bank")
+```
+
+## Sample data
+
+```{r}
+# Model data
+model_data <- bank %>%
+  mutate(
+    education = case_when(
+      education %in% c("basic.4y", "basic.6y", "illiterate") ~ "less.than.5.years",
+      TRUE ~ education
+    )
+  ) %>%
+  mutate(resp = ifelse(term_deposit=="yes", 1, 0)) %>%
+  select(-in_default, -date, -personal_loan, -term_deposit)
+
+# Sample training data
+training_data <- model_data %>%
+  filter(percentile <= 15) %>%
+  select(-percentile) %>%
+  collect %>%
+  mutate_at(
+    vars(job, marital, education, housing_loan, contact, month, day_of_week, prior_outcome),
+    funs(as_factor(.))
+    )
+
+# Sample testing data
+testing_data <- model_data %>%
+  filter(percentile > 75) %>%
+  select(-percentile) %>%
+  collect %>%
+  mutate_at(
+    vars(job, marital, education, housing_loan, contact, month, day_of_week, prior_outcome),
+    funs(as_factor(.))
+    )
+
+# All sample data
+sample_data <- bind_rows(
+  train = training_data, 
+  test = testing_data, 
+  .id = "data")
+```
+
+# Models
+
+## 1. Logistic Regression
+
+In this context, a negative co-efficient makes it more likely that someone will purchase a term_deposit (i.e. a positive number is "no purchase").
+
+```{r}
+# Logistic regression model
+model_log <- glm(resp ~ ., binomial, training_data)
+
+# Variable importance
+tidy(model_log) %>% 
+  filter(p.value < .05) %>% 
+  arrange(abs(p.value)) %>%
+  ggplot(aes(reorder(term, desc(p.value)), abs(statistic))) + 
+  geom_bar(stat = "Identity") + 
+  coord_flip() +
+  theme_minimal() +
+  labs(x = "", y = "", title = "abs(t-value) logisitic model")
+
+# Lift plot
+sample_data %>%
+  mutate(
+    pred = predict(model_log, ., type = "response"),
+    decile = ntile(desc(pred), 10)) %>%
+  select(data, resp, pred, decile) %>%
+  group_by(data, decile) %>%
+  summarize(percent = 100 * mean(resp)) %>%
+  ggplot(aes(decile, percent, fill = data)) + geom_bar(stat = "Identity", position = "dodge") +
+  ggtitle("Lift chart for logistic regression model")
+```
+
+Pick a cutoff where the specificity is similar to the specificity of the random forest model, so that you compare sensitivities with similar TNRs.
+
+
+## 2. Random Forest
+
+```{r}
+# Random forest model
+model_rf <- randomForest(resp ~  . , data = training_data, ntree = 100, importance = TRUE)
+
+# Variable importance
+varImpPlot(model_rf)
+
+# Lift plot
+sample_data %>%
+  mutate(
+    pred = predict(model_rf, ., type = "response"),
+    decile = ntile(desc(pred), 10)) %>%
+  select(data, resp, pred, decile) %>%
+  group_by(data, decile) %>%
+  summarize(percent = 100 * mean(resp)) %>%
+  ggplot(aes(decile, percent, fill = data)) + geom_bar(stat = "Identity", position = "dodge") +
+  ggtitle("Lift chart for random forest model")
+```
+
+# Summary
+
+```{r}
+# Cutoff
+cutoff <- .88
+
+# Apply cutoff
+pred <- sample_data %>%
+  mutate(
+    pred_log = case_when(
+      predict(model_log, ., type = "response") >= cutoff ~ 1,
+      TRUE ~ 0),
+    pred_rf = case_when(
+      predict(model_rf, ., type = "response") >= cutoff ~ 1,
+      TRUE ~ 0)
+    )
+
+# Build confusion matrix
+mat_log <- confusionMatrix(pred$pred_log, pred$resp)
+mat_rf <- confusionMatrix(pred$pred_rf, pred$resp)
+
+# Summarise
+rbind(
+  bind_cols(
+    Metric = names(mat_log$overall),
+    Logistic = round(mat_log$overall, 2),
+    RandomForest = round(mat_rf$overall, 2)
+  ),
+  bind_cols(
+    Metric = names(mat_log$byClass),
+    Logistic = round(mat_log$byClass, 2),
+    RandomForest = round(mat_rf$byClass, 2)
+  )
+)
+```
+
+# Save
+
+```{r}
+saveRDS(model_log, "api/model_logistic.RDS")
+saveRDS(model_rf, "api/model_rf.RDS")
+saveRDS(pred, "api/pred_all.RDS")
+saveRDS(sample_data[NULL, ], "api/sample_data_str.RDS")
+writeCSV(sample_data, "api/sample_data.csv")
+```

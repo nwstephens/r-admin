@@ -1,0 +1,56 @@
+---
+title: "Tidy Predict"
+output: html_document
+---
+
+```{r setup}
+library(tidyverse)
+library(DBI)
+library(tidypredict)
+library(dbplyr)
+```
+
+## Data connection
+
+```{r}
+con <- dbConnect(odbc::odbc(), "Postgres (Finance)")
+bank <- tbl(con, "bank")
+```
+
+## Model data
+
+```{r}
+# Load model
+model_log <- readRDS("api/model_logistic.RDS")
+
+# Create model data
+model_data <- bank %>%
+  mutate(
+    education = case_when(
+      education %in% c("basic.4y", "basic.6y", "illiterate") ~ "less.than.5.years",
+      TRUE ~ education
+    )
+  ) %>%
+  mutate(resp = ifelse(term_deposit=="yes", 1, 0)) %>%
+  select(-in_default, -date, -personal_loan, -term_deposit)
+
+# Score the data
+scored_data <- tidypredict_to_column(model_data, model_log)
+scored_data
+
+# Scoring code
+scored_sql <-sql_render(scored_data, con)
+scored_sql
+```
+
+## Insert scored data
+
+```{r}
+# Create new empty table
+dbExecute(con, "drop table bank_scores")
+dbWriteTable(con, "bank_scores", collect(head(scored_data, 0)))
+
+# Insert scored data
+dbExecute(con, build_sql("INSERT INTO bank_scores ", scored_sql, con = con))
+```
+
